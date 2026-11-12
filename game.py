@@ -6,10 +6,9 @@ import gamefunctions
  
  
 def main():
-    """Run the town menu loop until the player quits."""
-    name = gamefunctions.get_player_name()
-    gamefunctions.print_welcome(name, 30)
-    state = gamefunctions.new_game_state(name)
+    """Start or load a game, then run the town menu loop until the player quits."""
+    state = gamefunctions.start_menu()
+    gamefunctions.print_welcome(state["player_name"], 30)
     while True:
         gamefunctions.print_town_menu(state)
         choice = gamefunctions.get_menu_choice(["1", "2", "3", "4", "5"])
@@ -22,8 +21,10 @@ def main():
         elif choice == "4":
             gamefunctions.equip_item(state, "weapon")
         else:
-            print(f"\nThanks for playing {state['player_name']}, see you soon! :)")
-            break
+            # Only quit if the save worked, so progress is never lost silently.
+            if gamefunctions.save_game(state, gamefunctions.get_save_filename()):
+                print(f"Thanks for playing {state['player_name']}, see you soon! :)")
+                break
  
  
 if __name__ == "__main__":
