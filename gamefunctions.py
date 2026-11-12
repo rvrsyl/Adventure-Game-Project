@@ -17,10 +17,15 @@ Constants:
     MAX_HP: The most health the player can have.
     SLEEP_COST: Gold charged to sleep and restore all health.
     STARTING_GOLD: Gold a new player starts with.
+    DEFAULT_SAVE_FILE: Save filename used when the player just presses Enter.
     SHOP_ITEMS: The items sold at the market.
  
 Functions:
     new_game_state: Create the state dictionary for a new game.
+    save_game: Write the game state to a JSON file.
+    load_game: Read and validate a game state from a JSON file.
+    get_save_filename: Ask the user which save file to use.
+    start_menu: Let the player start a new game or load a saved one.
     purchase_item: Buy as many items as the player can afford.
     new_random_monster: Create a random monster as a dictionary.
     print_welcome: Print a centered greeting for the player.
@@ -47,11 +52,13 @@ Typical usage example:
 """
  
 import copy
+import json
 import random
  
 MAX_HP = 100
 SLEEP_COST = 5
 STARTING_GOLD = 50
+DEFAULT_SAVE_FILE = "savegame.json"
  
 # Template dictionaries for everything the market sells. Each purchase
 # adds an independent copy of the template to the player's inventory.
@@ -93,6 +100,139 @@ def new_game_state(player_name):
     }
  
  
+def save_game(state, filename=DEFAULT_SAVE_FILE):
+    """
+    Write the game state to a JSON file.
+
+    Everything in the state is saved: the player's name, HP, gold, and
+    the whole inventory (including each item's current durability and
+    whether it is equipped).
+
+    Parameters:
+        state (dict): The game state, as made by new_game_state.
+        filename (str): The file to write. Defaults to DEFAULT_SAVE_FILE.
+
+    Returns:
+        bool: True if the game was saved, False if the file could not
+            be written (the reason is printed).
+    """
+    try:
+        with open(filename, "w", encoding="utf-8") as save_file:
+            json.dump(state, save_file, indent=2)
+    except OSError as error:
+        print(f"\nCould not save the game: {error}")
+        return False
+    print(f"\nGame saved to {filename}.")
+    return True
+
+
+def load_game(filename=DEFAULT_SAVE_FILE):
+    """
+    Read a game state from a JSON file and check that it is usable.
+
+    Parameters:
+        filename (str): The file to read. Defaults to DEFAULT_SAVE_FILE.
+
+    Returns:
+        dict or None: The loaded state, or None if the file is missing,
+            is not valid JSON, or does not hold a valid game state (the
+            reason is printed).
+    """
+    try:
+        with open(filename, "r", encoding="utf-8") as save_file:
+            state = json.load(save_file)
+    except FileNotFoundError:
+        print(f"\nNo save file named {filename} was found.")
+        return None
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"\nCould not read {filename}: {error}")
+        return None
+
+    if not _is_valid_state(state):
+        print(f"\n{filename} is not a valid save file.")
+        return None
+    print(f"\nGame loaded from {filename}.")
+    return state
+
+
+def _is_valid_state(state):
+    """
+    Check that a loaded object has the shape new_game_state creates.
+
+    Parameters:
+        state (object): Whatever was read from a save file.
+
+    Returns:
+        bool: True if it has the expected keys and value types.
+    """
+    if not isinstance(state, dict):
+        return False
+    expected = {
+        "player_name": str,
+        "player_hp": int,
+        "player_gold": int,
+        "player_inventory": list,
+    }
+    for key, kind in expected.items():
+        if not isinstance(state.get(key), kind):
+            return False
+    for item in state["player_inventory"]:
+        if not isinstance(item, dict):
+            return False
+        if "name" not in item or "type" not in item:
+            return False
+        if item["type"] == "weapon":
+            for key in ("damage", "maxDurability", "currentDurability"):
+                if not isinstance(item.get(key), int):
+                    return False
+    return True
+
+
+def get_save_filename():
+    """
+    Ask the user which save file to use.
+
+    Pressing Enter with no text uses DEFAULT_SAVE_FILE. A name with no
+    extension gets ".json" added.
+
+    Parameters:
+        None
+
+    Returns:
+        str: The filename to use.
+    """
+    name = input(f"Save file name (press Enter for {DEFAULT_SAVE_FILE}):\n").strip()
+    if not name:
+        return DEFAULT_SAVE_FILE
+    if "." not in name:
+        name += ".json"
+    return name
+
+
+def start_menu():
+    """
+    Let the player start a new game or load a saved one.
+
+    Loading is retried until it succeeds or the player chooses to start
+    a new game instead. For a new game the player is asked for a name.
+
+    Parameters:
+        None
+
+    Returns:
+        dict: The game state to play with.
+    """
+    while True:
+        print("\n1) New Game")
+        print("2) Load Game")
+        if get_menu_choice(["1", "2"]) == "1":
+            return new_game_state(get_player_name())
+        state = load_game(get_save_filename())
+        if state is not None:
+            return state
+        print("Try again, or choose New Game.")
+
+
 def purchase_item(itemPrice, startingCurrency, quantityToPurchase=1):
     """
     Attempt to buy items, purchasing as many as can be afforded.
@@ -330,7 +470,7 @@ def print_town_menu(state):
     print(f"2) Sleep (Restore HP for {SLEEP_COST} Gold)")
     print("3) Visit the Shop")
     print("4) Equip a Weapon")
-    print("5) Quit")
+    print("5) Save and Quit")
  
  
 def sleep(state):
@@ -599,4 +739,3 @@ def test_functions():
  
 if __name__ == "__main__":
     test_functions()
-    
