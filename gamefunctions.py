@@ -11,6 +11,7 @@ passed to the functions that need it:
         "player_hp": int,
         "player_gold": int,
         "player_inventory": list of item dictionaries,
+        "map_state": dict (see new_map_state),
     }
  
 Constants:
@@ -19,9 +20,16 @@ Constants:
     STARTING_GOLD: Gold a new player starts with.
     DEFAULT_SAVE_FILE: Save filename used when the player just presses Enter.
     SHOP_ITEMS: The items sold at the market.
+    MAP_SIZE: Width and height of the square world map.
  
 Functions:
     new_game_state: Create the state dictionary for a new game.
+    new_map_state: Create the map part of the game state.
+    place_monster: Move the map's monster to a random free square.
+    move_player: Move the player one square on the map (the model).
+    render_map: Build the text picture of the map from the map state.
+    run_map: Let the player walk around the map until town or a monster.
+    explore: Run the map, fight monsters it finds, and return to town.
     save_game: Write the game state to a JSON file.
     load_game: Read and validate a game state from a JSON file.
     get_save_filename: Ask the user which save file to use.
@@ -59,6 +67,15 @@ MAX_HP = 100
 SLEEP_COST = 5
 STARTING_GOLD = 50
 DEFAULT_SAVE_FILE = "savegame.json"
+MAP_SIZE = 10
+TOWN_POSITION = [0, 0]
+MOVE_KEYS = {"w": "up", "s": "down", "a": "left", "d": "right"}
+DIRECTION_OFFSETS = {
+    "up": (0, -1),
+    "down": (0, 1),
+    "left": (-1, 0),
+    "right": (1, 0),
+}
  
 # Template dictionaries for everything the market sells. Each purchase
 # adds an independent copy of the template to the player's inventory.
@@ -90,13 +107,15 @@ def new_game_state(player_name):
  
     Returns:
         dict: The state, with keys 'player_name' (str), 'player_hp' (int),
-            'player_gold' (int), and 'player_inventory' (list of dict).
+            'player_gold' (int), 'player_inventory' (list of dict), and
+            'map_state' (dict, see new_map_state).
     """
     return {
         "player_name": player_name,
         "player_hp": MAX_HP,
         "player_gold": STARTING_GOLD,
         "player_inventory": [],
+        "map_state": new_map_state(),
     }
  
  
@@ -151,6 +170,9 @@ def load_game(filename=DEFAULT_SAVE_FILE):
     if not _is_valid_state(state):
         print(f"\n{filename} is not a valid save file.")
         return None
+    if "map_state" not in state:
+        # Saves from before the map existed: start with a fresh map.
+        state["map_state"] = new_map_state()
     print(f"\nGame loaded from {filename}.")
     return state
 
@@ -185,6 +207,32 @@ def _is_valid_state(state):
             for key in ("damage", "maxDurability", "currentDurability"):
                 if not isinstance(item.get(key), int):
                     return False
+    if "map_state" in state and not _is_valid_map_state(state["map_state"]):
+        return False
+    return True
+
+
+def _is_valid_map_state(map_state):
+    """
+    Check that an object has the shape new_map_state creates.
+
+    Parameters:
+        map_state (object): Whatever was read from a save file.
+
+    Returns:
+        bool: True if 'player', 'town', and 'monster' are each an [x, y]
+            pair of ints that lies on the map.
+    """
+    if not isinstance(map_state, dict):
+        return False
+    for key in ("player", "town", "monster"):
+        position = map_state.get(key)
+        if not isinstance(position, list) or len(position) != 2:
+            return False
+        for coordinate in position:
+            if (not isinstance(coordinate, int) or isinstance(coordinate, bool)
+                    or not 0 <= coordinate < MAP_SIZE):
+                return False
     return True
 
 
@@ -231,6 +279,173 @@ def start_menu():
         if state is not None:
             return state
         print("Try again, or choose New Game.")
+
+
+def new_map_state():
+    """
+    Create the map part of the game state.
+
+    The map is a MAP_SIZE x MAP_SIZE grid. Positions are [x, y] lists,
+    where x is the column and y is the row, so [0, 0] is the upper-left
+    square. Lists (not tuples) are used so the state survives a round
+    trip through a JSON save file unchanged. The player starts on the
+    town square and one monster is placed on a random other square.
+
+    Parameters:
+        None
+
+    Returns:
+        dict: The map state, with keys 'player', 'town', and 'monster'.
+    """
+    map_state = {
+        "player": list(TOWN_POSITION),
+        "town": list(TOWN_POSITION),
+        "monster": list(TOWN_POSITION),
+    }
+    place_monster(map_state)
+    return map_state
+
+
+def place_monster(map_state):
+    """
+    Move the monster to a random square that nothing else occupies.
+
+    The new square is never the town, never the player's square, and
+    never the square the monster is on now, so the monster always moves.
+
+    Parameters:
+        map_state (dict): The map state. Its 'monster' is updated in place.
+
+    Returns:
+        None
+    """
+    blocked = (map_state["town"], map_state["player"], map_state["monster"])
+    free = [[x, y] for y in range(MAP_SIZE) for x in range(MAP_SIZE)
+            if [x, y] not in blocked]
+    map_state["monster"] = random.choice(free)
+
+
+def move_player(game_state, direction):
+    """
+    Move the player one square on the map.
+
+    This only changes the model (game_state["map_state"]); nothing is
+    drawn here. The player cannot leave the map: a move off an edge
+    changes nothing.
+
+    Parameters:
+        game_state (dict): The game state. Its map_state 'player' position
+            is updated in place.
+        direction (str): One of 'up', 'down', 'left', or 'right'.
+
+    Returns:
+        str: "moved" for normal movement, "returned_to_town" if the player
+            moved onto the town square, "monster_encounter" if the player
+            moved onto the monster square, or "blocked" if the move would
+            have left the map (the player did not move).
+
+    Raises:
+        ValueError: If direction is not one of the four directions.
+    """
+    if direction not in DIRECTION_OFFSETS:
+        raise ValueError(f"Unknown direction: {direction!r}")
+    map_state = game_state["map_state"]
+    step_x, step_y = DIRECTION_OFFSETS[direction]
+    new_x = map_state["player"][0] + step_x
+    new_y = map_state["player"][1] + step_y
+    if not (0 <= new_x < MAP_SIZE and 0 <= new_y < MAP_SIZE):
+        return "blocked"
+
+    map_state["player"] = [new_x, new_y]
+    if map_state["player"] == map_state["town"]:
+        return "returned_to_town"
+    if map_state["player"] == map_state["monster"]:
+        return "monster_encounter"
+    return "moved"
+
+
+def render_map(map_state):
+    """
+    Build the text picture of the map from the map state.
+
+    The picture depends only on map_state. Each square is one character:
+    P for the player, T for the town, M for the monster, and a period for
+    anything else. The player is drawn over the town or monster square
+    when standing on one.
+
+    Parameters:
+        map_state (dict): The map state, as made by new_map_state.
+
+    Returns:
+        str: The map, one line per row, with no trailing newline.
+    """
+    symbols = {
+        tuple(map_state["monster"]): "M",
+        tuple(map_state["town"]): "T",
+        tuple(map_state["player"]): "P",
+    }
+    rows = []
+    for y in range(MAP_SIZE):
+        rows.append("".join(f" {symbols.get((x, y), '.')} "
+                        for x in range(MAP_SIZE)))
+    return "\n".join(rows)
+
+def run_map(game_state):
+    """
+    Let the player walk around the map until something ends the trip.
+
+    Each turn the map is drawn from game_state["map_state"], then one key
+    is read (w = up, s = down, a = left, d = right) and passed to
+    move_player. The trip ends when the player steps onto the town square
+    or onto the monster square.
+
+    Parameters:
+        game_state (dict): The game state. Its map_state is updated in
+            place as the player moves.
+
+    Returns:
+        str: "town" if the player returned to town, or "monster" if the
+            player ran into the monster.
+    """
+    print("\nYou leave Wakefield and look around. (w/a/s/d to move)")
+    while True:
+        print()
+        print(render_map(game_state["map_state"]))
+        print("P = You, T = Town, M = Monster")
+        key = get_menu_choice(list(MOVE_KEYS))
+        result = move_player(game_state, MOVE_KEYS[key])
+        if result == "returned_to_town":
+            return "town"
+        if result == "monster_encounter":
+            return "monster"
+        if result == "blocked":
+            print("You can't go any further that way.")
+
+
+def explore(state):
+    """
+    Run the map, fight any monsters found, and end back in town.
+
+    After each fight the player stays on the monster's old square and the
+    monster reappears on a random free square. The player leaves the map
+    by walking back onto the town square, or by being knocked out in a
+    fight, which also sends them to town.
+
+    Parameters:
+        state (dict): The game state.
+
+    Returns:
+        None
+    """
+    map_state = state["map_state"]
+    while True:
+        if run_map(state) == "town":
+            return
+        outcome = fight_monster(state)
+        if outcome == "lost":
+            map_state["player"] = list(map_state["town"])
+            return
+        place_monster(map_state)
 
 
 def purchase_item(itemPrice, startingCurrency, quantityToPurchase=1):
@@ -342,7 +557,7 @@ def print_welcome(name, width):
         >>> print_welcome("Jack", 20)
             Welcome, Jack!    
     """
-    print(f"\n{'Welcome, ' + name + '!':^{width}}")
+    print(f"\n{'Welcome to Wakefield, ' + name + '!':^{width}}")
  
  
 def print_market_menu(item1Name, item1Price, item2Name, item2Price):
@@ -404,7 +619,7 @@ def get_player_name():
         str: The player's name.
     """
     while True:
-        name = input("What is your name?\n").strip()
+        name = input("\nWhat is your name?\n").strip()
         if name:
             return name
         print("Please enter a name.")
@@ -461,13 +676,13 @@ def print_town_menu(state):
                        f"{weapon['maxDurability']})")
     else:
         weapon_text = "None"
-    print("\nYou are in Wakefield.")
+    print("\nYou are in the Town Square.")
     print(f"Current HP: {state['player_hp']}, "
           f"Current Gold: {state['player_gold']}")
     print(f"Equipped Weapon: {weapon_text}")
     print("What would you like to do?\n")
-    print("1) Leave Wakefield (Fight a Monster)")
-    print(f"2) Sleep (Restore HP for {SLEEP_COST} Gold)")
+    print("1) Explore the Forest")
+    print(f"2) Nap Time (Restore HP for {SLEEP_COST} Gold)")
     print("3) Visit the Shop")
     print("4) Equip a Weapon")
     print("5) Save and Quit")
@@ -635,7 +850,8 @@ def fight_monster(state):
             and 'player_inventory' are updated.
  
     Returns:
-        None
+        str: "won" if the monster was defeated, "fled" if the player ran
+            away, or "lost" if the player passed out.
     """
     monster = new_random_monster()
     monster_hp = monster["health"]
@@ -671,12 +887,15 @@ def fight_monster(state):
             state["player_inventory"].remove(weapon)
  
     if state["player_hp"] <= 0:
-        print("\nEverything goes black. You feel exhausted in your bed.")
+        print("\nEverything goes black. You feel exhausted in your hammock.")
         state["player_hp"] = 1
-    elif monster_hp <= 0:
+        return "lost"
+    if monster_hp <= 0:
         reward = monster["currency"]
         print(f"You killed {monster['name']} and got {reward} gold!")
         state["player_gold"] += reward
+        return "won"
+    return "fled"
  
  
 def test_functions():
